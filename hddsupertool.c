@@ -246,7 +246,7 @@ int main (int argc, char **argv)
   {
     path_fail_ccc = true;
   }
-  strncpy (called_name_ccc, argv[0], sizeof(called_name_ccc)-1);
+  strlcpy (called_name_ccc, argv[0], sizeof(called_name_ccc));
   called_name_ccc[sizeof(called_name_ccc)-1] = '\0';
   if (called_name_ccc[0] == '/')
   {
@@ -1413,7 +1413,12 @@ int process_arguments_ccc(void)
     char current_argument[MAX_VARIABLE_LENGTH];
     char var_name[MAX_VARIABLE_NAME_LENGTH];
     char variable[MAX_VARIABLE_LENGTH];
-    strcpy (current_argument, argument_ccc[c]);
+    if (strlcpy (current_argument, argument_ccc[c], sizeof(current_argument)) >= sizeof(current_argument))
+    {
+      ERROR("Command-line argument is too long.");
+      cleanup_ccc();
+      exit (1);
+    }
     int length = strlen(current_argument);
     int var_num;
     int i;
@@ -1433,7 +1438,13 @@ int process_arguments_ccc(void)
           var_type = 'i';
         }
 
-        strncpy (var_name, current_argument, n);
+        if ((size_t)n >= sizeof(var_name))
+        {
+          ERROR("Command-line variable name is too long.");
+          cleanup_ccc();
+          exit (1);
+        }
+        memcpy (var_name, current_argument, n);
         var_name[n] = '\0';
         if (var_type == 's')
         {
@@ -1589,7 +1600,14 @@ int read_script_file_ccc(char *script_file_ccc)
     {
       if (full_script_path_ccc[n] == '/')
       {
-        strncpy (script_directory4_ccc, full_script_path_ccc, n+1);
+        size_t directory_length = (size_t)n + 1;
+        if (directory_length >= sizeof(script_directory4_ccc))
+        {
+          ERROR("Included script directory path is too long.");
+          return (1);
+        }
+        memcpy (script_directory4_ccc, full_script_path_ccc, directory_length);
+        script_directory4_ccc[directory_length] = '\0';
         current_script_directory_ccc = script_directory4_ccc;
         break;
       }
@@ -1675,7 +1693,7 @@ int read_script_file_ccc(char *script_file_ccc)
       }
     }
 
-    strlcpy (script_line_pointer_ccc[i], line, sizeof(script_line_pointer_ccc[i]));
+    strlcpy (script_line_pointer_ccc[i], line, cols);
     i++;
 
   }
@@ -2208,14 +2226,21 @@ int check_arguments_ccc(char *var_name)
       }
       char current_argument[MAX_VARIABLE_LENGTH];
       char name[MAX_VARIABLE_NAME_LENGTH];
-      strcpy (current_argument, argument_ccc[c]);
+      if (strlcpy (current_argument, argument_ccc[c], sizeof(current_argument)) >= sizeof(current_argument))
+      {
+        continue;
+      }
       int length = strlen(current_argument);
       int i;
       for (i = 0; i < length; i++)
       {
         if (current_argument[i] == '=')
         {
-          strncpy (name, current_argument, i);
+          if ((size_t)i >= sizeof(name))
+          {
+            break;
+          }
+          memcpy (name, current_argument, i);
           name[i] = '\0';
           //fprintf (stdout, "var_name= %s\n", var_name);
           if (strcmp(var_name, name) == 0)
