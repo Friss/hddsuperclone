@@ -22,6 +22,7 @@ BSDFLAGS = -lbsd
 CURLFLAGS = -DUSE_CURL -lcurl
 GTKFLAGS = `pkg-config --cflags --libs gtk+-$(GTKVER).0`
 PROG00 = hddsupertool
+PROG00_DMA32 = hddsupertool-dma32
 PROG01 = commands
 PROG02 = io
 PROG03 = common
@@ -43,6 +44,7 @@ menudir= $(DESTDIR)/usr/local/share/applications/
 driverdir= driver/
 
 all:  $(PROG12) $(PROG20) $(PROG30) $(PROG00)
+dma32: dma32-driver $(PROG00_DMA32)
 clone: $(PROG12) $(PROG20)
 viewer: $(PROG30)
 
@@ -55,6 +57,22 @@ $(PROG00) : $(PROG00).c
 	makeinfo $(PROG00).texi
 	makeinfo $(PROG00).texi --html --no-split
 	makeinfo $(PROG00).texi --plaintext -o $(PROG00).txt
+
+# Build the standalone tool with a small DMA32 allocation helper. This is
+# needed by direct AHCI mode on controllers that cannot address buffers above
+# 4 GiB. The helper module is loaded only for the lifetime of the tool.
+DMA32_CFLAGS ?= -Wall -Wextra -O2 -g -rdynamic -Wno-deprecated-declarations
+DMA32_MODULE_PATH ?= $(CURDIR)/driver/hddsuperclone_driver.ko
+
+dma32-driver:
+	$(MAKE) -C $(driverdir)
+
+$(PROG00_DMA32): $(PROG00).c $(PROG01).c $(PROG02).c $(PROG03).c $(PROG05).c $(UTILITY_LIBRARY)
+	xxd -i $(PROG00)_help.txt $(PROG00)_help.h
+	$(CC) $(DMA32_CFLAGS) $(PROG00).c $(PROG01).c $(PROG02).c $(PROG03).c $(PROG05).c $(UTILITY_LIBRARY) \
+		-o $(PROG00_DMA32) $(CURLFLAGS) $(USBFLAGS) $(BSDFLAGS) \
+		-DTOOL_DMA32_HELPER \
+		-DTOOL_DMA32_MODULE_PATH='"$(DMA32_MODULE_PATH)"'
 
 $(PROG12) : $(PROG12).c
 	$(CC) $(CFLAGS) $(PROG12).c $(UTILITY_LIBRARY) -o $(PROG12) $(BSDFLAGS)
@@ -87,6 +105,7 @@ $(PROG30) : $(PROG30)$(GTKVER).c
 
 clean:
 	rm -f $(PROG00)
+	rm -f $(PROG00_DMA32)
 	rm -f $(PROG00)_help.h
 	rm -f $(PROG00).1
 	rm -f $(PROG00).info

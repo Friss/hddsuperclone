@@ -2,6 +2,7 @@
 // You may use/distribute/modify this freely, under the terms of
 // the GNU General Public License version 2 or later version.
 // This software is distributed WITHOUT ANY WARRANTY.
+// Modified 2026-08-18: declare the direct-AHCI completion and MMIO helpers.
 
 
 #include <stdbool.h>
@@ -86,6 +87,12 @@ int enable_start_ccc(unsigned long long time);
 
 int enable_command_issue_ccc(unsigned long long time);
 
+int wait_command_issue_clear_ccc(unsigned long long time);
+
+uint64_t read_ahci_port_qword_ccc(unsigned int offset);
+
+void write_ahci_port_qword_ccc(unsigned int offset, uint64_t value);
+
 int post_direct_ccc(int command_type);
 
 int set_table_address_ccc(void);
@@ -146,9 +153,6 @@ extern int driver_running_ccc;
 #define LANGALLOCATEMEMERR 169
 extern char curlang_ccc[LANGCOUNT][MAXLANGLENGTH];
 extern char *version_number_ccc;
-
-
-
 
 
 

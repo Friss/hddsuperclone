@@ -2,6 +2,7 @@
 // You may use/distribute/modify this freely, under the terms of
 // the GNU General Public License version 2 or later version.
 // This software is distributed WITHOUT ANY WARRANTY.
+// Modified 2026-08-18: reset physical-address accumulators before pagemap scans.
 
 
 #include "common.h"
@@ -734,6 +735,7 @@ int get_table_physical_memory_location_ccc(void)
   unsigned char file_data[read_size];
   if (fread(file_data, 1, read_size, pagemap_ccc) == read_size )
   {
+    table_physical_address_ccc = 0;
     while (read_size > 0)
     {
       int i;
@@ -873,6 +875,7 @@ int get_command_list_physical_memory_location_ccc(void)
   unsigned char file_data[read_size];
   if (fread(file_data, 1, read_size, pagemap_ccc) == read_size )
   {
+    command_list_physical_address_ccc = 0;
     while (read_size > 0)
     {
       int i;
@@ -1009,6 +1012,7 @@ int get_fis_physical_memory_location_ccc(void)
   unsigned char file_data[read_size];
   if (fread(file_data, 1, read_size, pagemap_ccc) == read_size )
   {
+    fis_physical_address_ccc = 0;
     while (read_size > 0)
     {
       int i;
@@ -1545,4 +1549,3 @@ int rebuild_assist_disable_head_ccc (int head)
 
   return 0;
 }
-

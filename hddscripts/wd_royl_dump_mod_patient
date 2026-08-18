@@ -1,0 +1,155 @@
+echo 'Western Digital ROYL patient module reader (no IDENTIFY prerequisite).'
+echo 'READ-ONLY: this script does not write ROM, SA, or user sectors.'
+echo 'Set file==/path/to/output.bin to choose the output file.'
+
+include good_subroutines
+
+variablecheck $mod
+if $error_level < 16
+  echo 'Enter SA module number in decimal (0x for hex):'
+  userinput $choicestring
+  seti $mod = $choicestring 0
+endif
+
+sets $null = ""
+variablecheck $file
+if $error_level < 16
+  hex
+  sets $filename = "mod0x" $mod ".bin"
+  decimal
+else
+  sets $filename = $file
+endif
+deletefile $filename
+
+# Enable WD vendor-specific commands.
+echo 'enable vsc'
+buffersize 0
+setreadpio
+ata28cmd 0x45 0x0b 0x00 0x44 0x57 0xa0 0x80
+gosub status_check
+
+# Select the requested SA module. WD's sequence sends this request twice.
+echo 'prepare module access'
+buffersize 0x200
+clearbuffer
+seti $idlow = $mod & 0xff
+seti $idhigh = $mod > 8
+setbuffer 0
+  08 00 01 00 $idlow $idhigh
+endbuffer
+setwritepio
+ata28cmd 0xd6 0x01 0xbe 0x4f 0xc2 0xa0 0xb0
+gosub status_check
+ata28cmd 0xd6 0x01 0xbe 0x4f 0xc2 0xa0 0xb0
+gosub status_check
+
+# Read and validate the first sector before trusting its length field.
+echo 'read first module sector'
+buffersize 0x200
+clearbuffer
+setreadpio
+ata28cmd 0xd5 0x01 0xbf 0x4f 0xc2 0xa0 0xb0
+gosub status_check
+
+sets $signature = buffer 0 4
+sets $royl = "ROYL"
+if $signature != $royl
+  echo 'ERROR: response does not begin with ROYL; no module file written.'
+  gosub disable_vsc
+  previousscript
+endif
+
+seti $returned_mod = buffer 8 w
+if $returned_mod != $mod
+  hex
+  echo 'ERROR: requested module 0x' $mod ' but response identifies as 0x' $returned_mod
+  decimal
+  gosub disable_vsc
+  previousscript
+endif
+
+seti $mod_length_sectors = buffer 0xa
+seti $tempnum = buffer 0xb
+seti $tempnum = $tempnum > 8
+seti $mod_length_sectors = $mod_length_sectors + $tempnum
+if $mod_length_sectors < 1
+  echo 'ERROR: module reported zero sectors; no module file written.'
+  gosub disable_vsc
+  previousscript
+endif
+if $mod_length_sectors > 0x2000
+  echo 'ERROR: implausible module length; no module file written.'
+  gosub disable_vsc
+  previousscript
+endif
+
+echo 'module length in sectors=' $mod_length_sectors
+seti $scratchpad_size = $mod_length_sectors * 512
+scratchpadsize $scratchpad_size
+clearscratchpad
+copybuffertoscratchpad 0 0 0x200
+
+seti $count = 1
+while $count < $mod_length_sectors
+  buffersize 0x200
+  clearbuffer
+  setreadpio
+  ata28cmd 0xd5 0x01 0xbf 0x4f 0xc2 0xa0 0xb0
+  gosub status_check
+  seti $offset = $count * 0x200
+  copybuffertoscratchpad 0 $offset 0x200
+  seti $count = $count + 1
+done
+
+gosub disable_vsc
+
+# Check the WD 32-bit additive checksum before preserving the result.
+seti $checksum = scratchpad 0xc dw
+seti $calculated_checksum = 0
+seti $count = 0
+while $count < $scratchpad_size
+  seti $dword = scratchpad $count dw
+  seti $calculated_checksum = $calculated_checksum + $dword
+  seti $count = $count + 4
+  if $count = 0xc
+    seti $count = $count + 4
+  endif
+done
+seti $calculated_checksum = $calculated_checksum & 0xffffffff
+seti $calculated_checksum = 0xffffffff - $calculated_checksum
+seti $calculated_checksum = $calculated_checksum + 1
+
+hex
+echo 'stored checksum=0x' $checksum
+echo 'calculated checksum=0x' $calculated_checksum
+decimal
+if $checksum != $calculated_checksum
+  echo 'ERROR: module checksum is bad; no module file written.'
+  previousscript
+endif
+
+writescratchpad $filename 0 0 $scratchpad_size
+echo 'VALID MODULE SAVED:' $filename
+previousscript
+end
+
+subroutine disable_vsc
+  echo 'disable vsc'
+  buffersize 0
+  setreadpio
+  ata28cmd 0x44 0x0b 0x00 0x44 0x57 0xa0 0x80
+  returnsub
+endsubroutine
+
+subroutine status_check
+  seti $command_failed = 0
+  gosub check_command_status
+  if $command_failed = 1
+    echo 'Command failed.'
+    gosub show_sense_data
+    gosub show_ata_return_status
+    previousscript
+  endif
+  returnsub
+endsubroutine

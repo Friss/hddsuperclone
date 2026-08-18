@@ -2,6 +2,7 @@
 // You may use/distribute/modify this freely, under the terms of
 // the GNU General Public License version 2 or later version.
 // This software is distributed WITHOUT ANY WARRANTY.
+// Modified 2026-08-18: harden AHCI MMIO setup, completion, tracing, and cleanup.
 
 
 #ifdef HAVE_CONFIG_H
@@ -48,6 +49,120 @@ char *version_number_ccc;
 
 
 #include "strncpy_wrapper.h"
+
+uint64_t read_ahci_port_qword_ccc(unsigned int offset)
+{
+  uint32_t low = 0;
+  uint32_t high = 0;
+  memcpy(&low, port_virt_addr_ccc + offset, 4);
+  memcpy(&high, port_virt_addr_ccc + offset + 4, 4);
+  return (uint64_t)low | ((uint64_t)high << 32);
+}
+
+
+
+
+
+void write_ahci_port_qword_ccc(unsigned int offset, uint64_t value)
+{
+  uint32_t low = (uint32_t)value;
+  uint32_t high = (uint32_t)(value >> 32);
+
+  // PCI BAR MMIO registers are 32 bits wide.  A single compiler-generated
+  // 64-bit store can update only the low dword on controllers such as ASM1061.
+  memcpy(port_virt_addr_ccc + offset, &low, 4);
+  memcpy(port_virt_addr_ccc + offset + 4, &high, 4);
+}
+
+
+
+
+
+// PxCI is the authoritative completion indication for an AHCI command slot.
+// A drive in bootstrap/SA-recovery state may leave PxTFD at zero until it has
+// actually processed the first command, so PxTFD alone cannot prove that the
+// command completed.
+static void trace_ahci_command_ccc(const char *phase, unsigned long long elapsed)
+{
+  const char *trace = getenv("HDDSUPERTOOL_AHCI_TRACE");
+  if (trace == NULL || trace[0] == '\0' || strcmp(trace, "0") == 0)
+  {
+    return;
+  }
+
+  uint32_t ci = 0;
+  uint32_t is = 0;
+  uint32_t tfd = 0;
+  uint32_t serr = 0;
+  uint32_t cmd = 0;
+  uint64_t clb = 0;
+  uint64_t fb = 0;
+  uint8_t d2h_type = 0;
+  uint32_t header_flags = 0;
+  uint32_t header_prdbc = 0;
+  uint32_t prdt_dba = 0;
+  uint32_t prdt_dbau = 0;
+  uint32_t prdt_dbc = 0;
+  memcpy(&ci, port_virt_addr_ccc + superbyte_ccc[6], 4);
+  memcpy(&is, port_virt_addr_ccc + superbyte_ccc[7], 4);
+  memcpy(&tfd, port_virt_addr_ccc + superbyte_ccc[8], 4);
+  memcpy(&serr, port_virt_addr_ccc + superbyte_ccc[18], 4);
+  memcpy(&cmd, port_virt_addr_ccc + superbyte_ccc[10], 4);
+  clb = read_ahci_port_qword_ccc(superbyte_ccc[11]);
+  fb = read_ahci_port_qword_ccc(superbyte_ccc[12]);
+  if (fis_buffer_ccc != NULL)
+  {
+    memcpy(&d2h_type, fis_buffer_ccc + 0x40, 1);
+  }
+  if (command_list_buffer_ccc != NULL)
+  {
+    memcpy(&header_flags, command_list_buffer_ccc, 4);
+    memcpy(&header_prdbc, command_list_buffer_ccc + 4, 4);
+  }
+  if (table_buffer_ccc != NULL)
+  {
+    memcpy(&prdt_dba, table_buffer_ccc + 0x80, 4);
+    memcpy(&prdt_dbau, table_buffer_ccc + 0x84, 4);
+    memcpy(&prdt_dbc, table_buffer_ccc + 0x8c, 4);
+  }
+
+  fprintf(stdout,
+          "AHCI trace %-10s elapsed=%llu us CI=%08x IS=%08x TFD=%08x "
+          "SERR=%08x CMD=%08x CLB=%016llx/%016llx FB=%016llx/%016llx "
+          "D2H=%02x\n",
+          phase, elapsed, ci, is, tfd, serr, cmd,
+          (unsigned long long)clb, command_list_physical_address_ccc,
+          (unsigned long long)fb, fis_physical_address_ccc, d2h_type);
+  if (command_list_buffer_ccc != NULL && table_buffer_ccc != NULL)
+  {
+    int i;
+    fprintf(stdout,
+            "AHCI desc  HDR0=%08x PRDBC=%08x PRDT=%08x:%08x DBC=%08x "
+            "H2D=",
+            header_flags, header_prdbc, prdt_dbau, prdt_dba, prdt_dbc);
+    for (i = 0; i < 16; i++)
+    {
+      fprintf(stdout, "%02x", ((unsigned char *)table_buffer_ccc)[i]);
+    }
+    fprintf(stdout, " DATA=");
+    if (ccc_buffer_ccc != NULL)
+    {
+      for (i = 0; i < 16; i++)
+      {
+        fprintf(stdout, "%02x", ((unsigned char *)ccc_buffer_ccc)[i]);
+      }
+    }
+    else
+    {
+      fprintf(stdout, "(null)");
+    }
+    fprintf(stdout, "\n");
+  }
+  fflush(stdout);
+}
+
+
+
 
 
 
@@ -2222,11 +2337,18 @@ int ahci_rw_ccc(int command_type, int write_bit)
       memcpy(port_virt_addr_ccc + superbyte_ccc[69], &io_doubleword_ccc, 4);
     }
 
-    // set the command issue bit
-    enable_command_issue_ccc(COMMAND_BIT_TIME);
-
-    // wait while busy, if timeout do soft reset
-    return_value_ccc = wait_not_busy_or_drq_ccc(soft_reset_time_ccc + first_read_time_ccc, 1);
+    // Issue slot 0 and wait for PxCI to prove that the HBA completed it. A
+    // recovery-state drive can leave PxTFD at zero while the command is still
+    // active, so PxTFD alone is not a completion indication.
+    return_value_ccc = enable_command_issue_ccc(COMMAND_BIT_TIME);
+    if (return_value_ccc == 0)
+    {
+      return_value_ccc = wait_command_issue_clear_ccc(soft_reset_time_ccc + first_read_time_ccc);
+    }
+    if (return_value_ccc == 0)
+    {
+      return_value_ccc = wait_not_busy_or_drq_ccc(soft_reset_time_ccc + first_read_time_ccc, 1);
+    }
     first_read_time_ccc = 0;
     //fprintf (stdout, "return from wait = %d\n", return_value_ccc);    //debug
     wait_for_ds_bit_ccc = false;
@@ -9366,8 +9488,8 @@ int connect_source_disk_ccc(void)
           }
 
           // backup current addresses
-          memcpy(&command_list_address_backup_ccc, port_virt_addr_ccc + superbyte_ccc[11], 8);
-          memcpy(&fis_address_backup_ccc, port_virt_addr_ccc + superbyte_ccc[12], 8);
+          command_list_address_backup_ccc = read_ahci_port_qword_ccc(superbyte_ccc[11]);
+          fis_address_backup_ccc = read_ahci_port_qword_ccc(superbyte_ccc[12]);
 
           // backup the interrupt settings
           memcpy(&interrupt_backup_ccc, port_virt_addr_ccc + superbyte_ccc[13], 4);
@@ -9394,10 +9516,8 @@ int connect_source_disk_ccc(void)
 
           // set new addresses
           ahci_address_changed_ccc = true;
-          uint64_t command_list_address = command_list_physical_address_ccc;
-          memcpy(port_virt_addr_ccc + superbyte_ccc[11], &command_list_address, 8);
-          uint64_t fis_address = fis_physical_address_ccc;
-          memcpy(port_virt_addr_ccc + superbyte_ccc[12], &fis_address, 8);
+          write_ahci_port_qword_ccc(superbyte_ccc[11], command_list_physical_address_ccc);
+          write_ahci_port_qword_ccc(superbyte_ccc[12], fis_physical_address_ccc);
 
           // wait for 1ms
           do_nanosleep_ccc(1000000);
@@ -10425,10 +10545,8 @@ int check_for_unwanted_changes_ccc(void)
       }
 
       // check addresses
-      uint64_t wtf2;
-      uint64_t wtf3;
-      memcpy(&wtf2, port_virt_addr_ccc + superbyte_ccc[11], 8);    // command list address
-      memcpy(&wtf3, port_virt_addr_ccc + superbyte_ccc[12], 8);    // fis address
+      uint64_t wtf2 = read_ahci_port_qword_ccc(superbyte_ccc[11]);
+      uint64_t wtf3 = read_ahci_port_qword_ccc(superbyte_ccc[12]);
       if (command_list_physical_address_ccc != wtf2)
       {
         changed_status = changed_status + 0x0800;
@@ -10664,32 +10782,69 @@ int enable_start_ccc(unsigned long long time)
 
 int enable_command_issue_ccc(unsigned long long time)
 {
-  int timeout = 0;
-  uint8_t byte;
-  timeout = 0;
   // set the command issue bit
   io_doubleword_ccc = 1;
   memcpy(port_virt_addr_ccc + superbyte_ccc[6], &io_doubleword_ccc, 4);
 
-  // wait for busy bit to set
-  memcpy(&byte, port_virt_addr_ccc + superbyte_ccc[8], 1);
-  byte = byte & 0x80;
-  unsigned long long start_time = get_elapsed_usec_ccc();
-  while (!byte)
+  // Flush the posted MMIO write. BSY is not required to become observable,
+  // especially for a fast command; wait_command_issue_clear_ccc() handles
+  // completion using PxCI.
+  memcpy(&io_doubleword_ccc, port_virt_addr_ccc + superbyte_ccc[6], 4);
+  (void)time;
+  trace_ahci_command_ccc("issued", 0);
+  return 0;
+}
+
+
+
+
+
+int wait_command_issue_clear_ccc(unsigned long long time)
+{
+  if (superbyte_ccc[51] != 0x4b)
   {
-    unsigned long long elapsed_time = get_elapsed_usec_ccc();
-    if (elapsed_time > start_time + time)
+    return 0;
+  }
+
+  unsigned long long start_time = get_elapsed_usec_ccc();
+  unsigned long long next_trace = 0;
+  uint32_t command_issue = 0;
+
+  while (1)
+  {
+    memcpy(&command_issue, port_virt_addr_ccc + superbyte_ccc[6], 4);    //potential superbyte
+    unsigned long long elapsed = get_elapsed_usec_ccc() - start_time;
+
+    if ((command_issue & 1) == 0)
     {
-      // if it exceeds general timeout then quit
-      timeout = 1;
-      break;
+      trace_ahci_command_ccc("complete", elapsed);
+      return 0;
     }
-    memcpy(&byte, port_virt_addr_ccc + superbyte_ccc[14], 1);
-    byte = byte & 0x80;
-    // give the cpu a chance to do something else so we are not using 100%
+    if (stop_signal_ccc)
+    {
+      trace_ahci_command_ccc("stopped", elapsed);
+      return STOP_SIGNAL_RETURN_CODE;
+    }
+    if (elapsed > time)
+    {
+      trace_ahci_command_ccc("timeout", elapsed);
+      // Use a distinct status so ahci_rw_ccc does not immediately soft-reset
+      // a recovery-state drive and erase the register evidence we need.
+      return 6;
+    }
+    if (elapsed > general_timeout_ccc)
+    {
+      trace_ahci_command_ccc("general", elapsed);
+      return 2;
+    }
+
+    if (elapsed >= next_trace)
+    {
+      trace_ahci_command_ccc("waiting", elapsed);
+      next_trace = elapsed + 250000;
+    }
     do_nanosleep_ccc(1);
   }
-  return (timeout);
 }
 
 
@@ -11273,7 +11428,7 @@ int unmap_driver_memory_ccc (void)
   }
   if (driver_main_data_buffer_address_ccc)
   {
-    munmap(driver_main_data_buffer_address_ccc, DRIVER_TRANSFER_BUFFER_SIZE);
+    munmap(driver_main_data_buffer_address_ccc, DRIVER_MAIN_DATA_BUFFER_SIZE);
     driver_main_data_buffer_address_ccc = NULL;
     ccc_buffer_ccc = NULL;
   }
@@ -11316,11 +11471,4 @@ void write_ctrl_error_bitmap_ccc(int offset, unsigned char value)
 {
   memcpy(driver_error_bitmap_address_ccc + offset, &value, 1);
 }
-
-
-
-
-
-
-
 

@@ -1,0 +1,3 @@
+getstatus
+echo "error=0x" $ata_return_error " status=0x" $ata_return_status " altstatus=0x" $ata_alternate_status
+end

@@ -2,6 +2,7 @@
 // You may use/distribute/modify this freely, under the terms of
 // the GNU General Public License version 2 or later version.
 // This software is distributed WITHOUT ANY WARRANTY.
+// Modified 2026-08-18: free DMA32 allocations with their original page orders.
 
 
 #include <linux/module.h>
@@ -1840,7 +1841,7 @@ static int mmapfop_close_m(struct inode *inode, struct file *filp)
 {
   struct mmap_info *info = filp->private_data;
   main_buffer = NULL;
-  free_page((unsigned long)info->data);
+  free_pages((unsigned long)info->data, 5);
   kfree(info);
   filp->private_data = NULL;
   //printk("mmapfop_close\n");
@@ -1925,7 +1926,7 @@ static int mmapfop_close_tb(struct inode *inode, struct file *filp)
 {
   struct mmap_info *info = filp->private_data;
   transfer_buffer = NULL;
-  free_page((unsigned long)info->data);
+  free_pages((unsigned long)info->data, 10);
   kfree(info);
   filp->private_data = NULL;
   //printk("mmapfop_close\n");
@@ -2010,7 +2011,7 @@ static int mmapfop_close_mdb(struct inode *inode, struct file *filp)
 {
   struct mmap_info *info = filp->private_data;
   main_data_buffer = NULL;
-  free_page((unsigned long)info->data);
+  free_pages((unsigned long)info->data, 10);
   kfree(info);
   filp->private_data = NULL;
   //printk("mmapfop_close\n");
