@@ -1,6 +1,14 @@
 # hddsuperclone
 HDDSuperClone, HDDSuperTool, HDDSCViewer
 
+## Experimental direct-AHCI recovery branch
+
+This branch adds a standalone HDDSuperTool direct-AHCI path with DMA32 helper
+buffers for drives that do not enumerate as Linux block devices. Build it with
+`make dma32`. See [docs/direct-ahci-dma32.md](docs/direct-ahci-dma32.md) for
+hardware requirements, safety constraints, and the read-only recovery-state
+module script.
+
 This repository continues the work on HDDSuperClone that was originally developed by (C) 2015-2022 Scott Dwyer and released under the GPL2 in 2022.
 You can find the original website and more information here:
 http://www.hddsuperclone.com/

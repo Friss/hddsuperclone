@@ -2,6 +2,7 @@
 // You may use/distribute/modify this freely, under the terms of
 // the GNU General Public License version 2 or later version.
 // This software is distributed WITHOUT ANY WARRANTY.
+// Modified 2026-08-18: initialize direct AHCI mode and add a DMA32 helper path.
 
 
 #ifdef HAVE_CONFIG_H
@@ -9,10 +10,98 @@
 #endif
 
 #include "common.h"
+#include "io.h"
 #include "hddsupertool.h"
 #include "hddsupertool_help.h"
 #include "strncpy_wrapper.h"
 #include "util.h"
+
+#ifdef TOOL_DMA32_HELPER
+#include <sys/wait.h>
+
+#ifndef TOOL_DMA32_MODULE_PATH
+#define TOOL_DMA32_MODULE_PATH "./driver/hddsuperclone_driver.ko"
+#endif
+
+static int dma32_helper_loaded_ccc;
+
+static int run_helper_command_ccc(char *const argv[])
+{
+  pid_t pid = fork();
+  if (pid < 0)
+  {
+    fprintf(stderr, "Unable to start %s (%s)\n", argv[0], strerror(errno));
+    return -1;
+  }
+  if (pid == 0)
+  {
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+
+  int status;
+  while (waitpid(pid, &status, 0) < 0)
+  {
+    if (errno != EINTR)
+    {
+      return -1;
+    }
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int install_dma32_helper_ccc(void)
+{
+  char ioctl_name[64];
+  char mmap_name[64];
+  char mmap_tb_name[64];
+  char mmap_mdb_name[64];
+
+  process_id_ccc = getpid();
+  snprintf(ioctl_name, sizeof(ioctl_name), "ioctl=%s%d", MAIN_DRIVER_IOCTL_NAME, process_id_ccc);
+  snprintf(mmap_name, sizeof(mmap_name), "mmap_m=%s%d", MAIN_DRIVER_MMAP_NAME, process_id_ccc);
+  snprintf(mmap_tb_name, sizeof(mmap_tb_name), "mmap_tb=%s%d", MAIN_DRIVER_MMAPTB_NAME, process_id_ccc);
+  snprintf(mmap_mdb_name, sizeof(mmap_mdb_name), "mmap_mdb=%s%d", MAIN_DRIVER_MMAPMDB_NAME, process_id_ccc);
+
+  char *const insmod_argv[] = {
+    "insmod", TOOL_DMA32_MODULE_PATH, ioctl_name, mmap_name,
+    mmap_tb_name, mmap_mdb_name, NULL
+  };
+  if (run_helper_command_ccc(insmod_argv) != 0)
+  {
+    fprintf(stderr, "Unable to load DMA32 helper module %s\n", TOOL_DMA32_MODULE_PATH);
+    return -1;
+  }
+  dma32_helper_loaded_ccc = 1;
+
+  if (map_driver_memory_ccc() != 0 || !driver_memory_mapped_ccc)
+  {
+    fprintf(stderr, "Unable to map DMA32 helper buffers\n");
+    return -1;
+  }
+  driver_installed_ccc = 1;
+  return 0;
+}
+
+static void uninstall_dma32_helper_ccc(void)
+{
+  if (driver_memory_mapped_ccc)
+  {
+    unmap_driver_memory_ccc();
+  }
+  driver_installed_ccc = 0;
+
+  if (dma32_helper_loaded_ccc)
+  {
+    char *const rmmod_argv[] = { "rmmod", "hddsuperclone_driver", NULL };
+    if (run_helper_command_ccc(rmmod_argv) != 0)
+    {
+      fprintf(stderr, "Warning: unable to unload DMA32 helper module\n");
+    }
+    dma32_helper_loaded_ccc = 0;
+  }
+}
+#endif
 
 
 char *title = "hddsupertool";
@@ -44,6 +133,7 @@ char full_script_path_ccc[PATH_MAX];
 char *script_line_buffer_ccc;
 extern char **script_line_pointer_ccc;
 unsigned int total_lines_ccc;
+extern unsigned int total_script_lines_ccc;
 char *number_variable_name_buffer_ccc;
 char **number_variable_name_pointer_ccc;
 unsigned int total_number_variables_ccc;
@@ -144,6 +234,9 @@ int main (int argc, char **argv)
   general_timeout_ccc = GENERAL_TIMER;
   initial_busy_wait_time_ccc = 5000000; // 5 sec
   ata_return_valid_ccc = 1;
+  process_id_ccc = getpid();
+  driver_installed_ccc = 0;
+  driver_memory_mapped_ccc = 0;
 
 
 //TODO: should we drfine FULLVERSION in conditional.h?
@@ -153,7 +246,7 @@ int main (int argc, char **argv)
   {
     path_fail_ccc = true;
   }
-  strncpy (called_name_ccc, argv[0], sizeof(called_name_ccc)-1);
+  strlcpy (called_name_ccc, argv[0], sizeof(called_name_ccc));
   called_name_ccc[sizeof(called_name_ccc)-1] = '\0';
   if (called_name_ccc[0] == '/')
   {
@@ -515,6 +608,86 @@ int main (int argc, char **argv)
   superbyte_ccc[17] = 0x28;
   superbyte_ccc[18] = 0x30;
   superbyte_ccc[19] = 0x0c;
+  // Keep the direct-I/O feature gates and AHCI register offsets in sync with
+  // hddsuperclone.c.  Leaving these entries zero makes the tool report success
+  // while ahci_rw_ccc(), set_and_send_regs_ccc(), and post_direct_ccc() are
+  // skipped entirely.
+  superbyte_ccc[20] = 0x29;
+  superbyte_ccc[21] = 0xa6;
+  superbyte_ccc[22] = 0xd1;
+  superbyte_ccc[23] = 0x5b;
+  superbyte_ccc[24] = 0xb4;
+  superbyte_ccc[25] = 0x71;
+  superbyte_ccc[26] = 0xfa;
+  superbyte_ccc[27] = 0x1e;
+  superbyte_ccc[28] = 0x4f;
+  superbyte_ccc[29] = 0x60;
+  superbyte_ccc[30] = 0xd9;
+  superbyte_ccc[31] = 0x9c;
+  superbyte_ccc[32] = 0x83;
+  superbyte_ccc[33] = 0xb0;
+  superbyte_ccc[34] = 0x51;
+  superbyte_ccc[35] = 0x26;
+  superbyte_ccc[36] = 0x6f;
+  superbyte_ccc[37] = 0xf5;
+  superbyte_ccc[38] = 0x50;
+  superbyte_ccc[39] = 0x0e;
+  superbyte_ccc[40] = 0x05;
+  superbyte_ccc[41] = 0xd4;
+  superbyte_ccc[42] = 0x20;
+  superbyte_ccc[43] = 0x3d;
+  superbyte_ccc[44] = 0x88;
+  superbyte_ccc[45] = 0x33;
+  superbyte_ccc[46] = 0x9b;
+  superbyte_ccc[47] = 0x41;
+  superbyte_ccc[48] = 0x0a;
+  superbyte_ccc[49] = 0xd9;
+  superbyte_ccc[50] = 0x22;
+  superbyte_ccc[51] = 0x4b;
+  superbyte_ccc[52] = 0xf0;
+  superbyte_ccc[53] = 0x8f;
+  superbyte_ccc[54] = 0xc6;
+  superbyte_ccc[55] = 0x46;
+  superbyte_ccc[56] = 0x6b;
+  superbyte_ccc[57] = 0xcc;
+  superbyte_ccc[58] = 0x74;
+  superbyte_ccc[59] = 0x0c;
+  superbyte_ccc[60] = 0xaa;
+  superbyte_ccc[61] = 0x6c;
+  superbyte_ccc[62] = 0x15;
+  superbyte_ccc[63] = 0x25;
+  superbyte_ccc[64] = 0x08;
+  superbyte_ccc[65] = 0x08;
+  superbyte_ccc[66] = 0x08;
+  superbyte_ccc[67] = 0x08;
+  superbyte_ccc[68] = 0x04;
+  superbyte_ccc[69] = 0x34;
+  superbyte_ccc[70] = 0x07;
+  superbyte_ccc[71] = 0x0f;
+  superbyte_ccc[72] = 0x0e;
+  superbyte_ccc[73] = 0x0c;
+  superbyte_ccc[74] = 0x04;
+  superbyte_ccc[75] = 0x08;
+  superbyte_ccc[76] = 0x00;
+  superbyte_ccc[77] = 0x7d;
+  superbyte_ccc[78] = 0x61;
+  superbyte_ccc[79] = 0x79;
+  superbyte_ccc[80] = 0x78;
+  superbyte_ccc[81] = 0x79;
+  superbyte_ccc[82] = 0x75;
+  superbyte_ccc[83] = 0x20;
+  superbyte_ccc[84] = 0x93;
+  superbyte_ccc[85] = 0xd3;
+  superbyte_ccc[86] = 0x5b;
+  superbyte_ccc[87] = 0x77;
+  superbyte_ccc[88] = 0x60;
+  superbyte_ccc[89] = 0x8e;
+  superbyte_ccc[90] = 0x23;
+  superbyte_ccc[91] = 0x73;
+  superbyte_ccc[92] = 0x63;
+  superbyte_ccc[93] = 0xb5;
+  superbyte_ccc[94] = 0x78;
+  superbyte_ccc[95] = 0x08;
 
   INFO("GOD MODE ACTIVE");
 #endif
@@ -524,6 +697,14 @@ int main (int argc, char **argv)
   {
     max_dma_size_ccc = ( (pagesize_ccc - 128) / 16 ) * pagesize_ccc;
   }
+
+#ifdef TOOL_DMA32_HELPER
+  if (direct_mode_ccc && install_dma32_helper_ccc() != 0)
+  {
+    cleanup_ccc();
+    exit(1);
+  }
+#endif
 
   return_value_ccc = initialize_memory_ccc();
   if (return_value_ccc != 0)
@@ -631,6 +812,20 @@ int main (int argc, char **argv)
           exit (1);
         }
 #endif
+      }
+
+      // Supplying --hbaaddress/--portaddress bypasses choose_device_ccc(),
+      // which is otherwise the only path that calls connect_source_disk_ccc().
+      // Map the HBA and install our command/FIS buffers before a script can
+      // issue its first direct AHCI command.
+      if (ahci_mode_ccc && port_virt_addr_ccc == NULL)
+      {
+        return_value_ccc = connect_source_disk_ccc();
+        if (return_value_ccc != 0)
+        {
+          cleanup_ccc();
+          exit (1);
+        }
       }
     }
 
@@ -754,23 +949,34 @@ void cleanup_ccc(void)
 
 #endif
 
-
   if (debug_ccc > 0)
   {
     fclose(debug_file_ccc);
   }
 
-  if (ahci_address_changed_ccc)
+  if (ahci_address_changed_ccc && port_virt_addr_ccc != NULL)
   {
-    // restore addresses
-    memcpy(port_virt_addr_ccc + superbyte_ccc[11], &command_list_address_backup_ccc, 8);
-    memcpy(port_virt_addr_ccc + superbyte_ccc[12], &fis_address_backup_ccc, 8);
+    /*
+     * The HBA must not fetch from a command/FIS buffer while its address is
+     * being changed or after the DMA32 helper releases that buffer.  The
+     * original cleanup wrote CLB/FB with ST/FRE still active, which can race
+     * the controller and hang during helper-module removal.
+     *
+     * This tool is used only after the kernel AHCI driver has been unbound;
+     * leave the command engine stopped.  A later kernel bind initializes it.
+     */
+    disable_start_ccc(START_BIT_TIME);
+    disable_fis_ccc(FIS_BIT_TIME);
+    write_ahci_port_qword_ccc(superbyte_ccc[11], command_list_address_backup_ccc);
+    write_ahci_port_qword_ccc(superbyte_ccc[12], fis_address_backup_ccc);
+    ahci_address_changed_ccc = false;
   }
 
   if (ahci_interrupt_changed_ccc)
   {
     // restore the interrupt settings
     memcpy(port_virt_addr_ccc + superbyte_ccc[13], &interrupt_backup_ccc, 4);
+    ahci_interrupt_changed_ccc = false;
   }
 
   if (table_address_changed_ccc)
@@ -800,6 +1006,11 @@ void cleanup_ccc(void)
     ioperm (control_base_address_ccc, 1, 0);
     ioperm (bus_base_address_ccc, 8, 0);
   }
+
+#ifdef TOOL_DMA32_HELPER
+  /* Restore the HBA first, then release buffers it may have referenced. */
+  uninstall_dma32_helper_ccc();
+#endif
 
   close (disk1_fd_ccc);
 
@@ -959,7 +1170,11 @@ int initialize_memory_ccc(void)
 
   // initialize main buffer
   // create a buffer that is memory aligned with the pagesize
-  if (direct_mode_ccc && fullversion_ccc)
+  if (direct_mode_ccc && (fullversion_ccc
+#ifdef TOOL_DMA32_HELPER
+      || driver_memory_mapped_ccc
+#endif
+     ))
   {
     return_value_ccc = get_buffer_physical_memory_locations_ccc();
     if (return_value_ccc != 0)
@@ -1198,7 +1413,12 @@ int process_arguments_ccc(void)
     char current_argument[MAX_VARIABLE_LENGTH];
     char var_name[MAX_VARIABLE_NAME_LENGTH];
     char variable[MAX_VARIABLE_LENGTH];
-    strcpy (current_argument, argument_ccc[c]);
+    if (strlcpy (current_argument, argument_ccc[c], sizeof(current_argument)) >= sizeof(current_argument))
+    {
+      ERROR("Command-line argument is too long.");
+      cleanup_ccc();
+      exit (1);
+    }
     int length = strlen(current_argument);
     int var_num;
     int i;
@@ -1218,7 +1438,13 @@ int process_arguments_ccc(void)
           var_type = 'i';
         }
 
-        strncpy (var_name, current_argument, n);
+        if ((size_t)n >= sizeof(var_name))
+        {
+          ERROR("Command-line variable name is too long.");
+          cleanup_ccc();
+          exit (1);
+        }
+        memcpy (var_name, current_argument, n);
         var_name[n] = '\0';
         if (var_type == 's')
         {
@@ -1374,7 +1600,14 @@ int read_script_file_ccc(char *script_file_ccc)
     {
       if (full_script_path_ccc[n] == '/')
       {
-        strncpy (script_directory4_ccc, full_script_path_ccc, n+1);
+        size_t directory_length = (size_t)n + 1;
+        if (directory_length >= sizeof(script_directory4_ccc))
+        {
+          ERROR("Included script directory path is too long.");
+          return (1);
+        }
+        memcpy (script_directory4_ccc, full_script_path_ccc, directory_length);
+        script_directory4_ccc[directory_length] = '\0';
         current_script_directory_ccc = script_directory4_ccc;
         break;
       }
@@ -1460,11 +1693,14 @@ int read_script_file_ccc(char *script_file_ccc)
       }
     }
 
-    strlcpy (script_line_pointer_ccc[i], line, sizeof(script_line_pointer_ccc[i]));
+    strlcpy (script_line_pointer_ccc[i], line, cols);
     i++;
 
   }
   total_lines_ccc = i;
+  // find_command_ccc() is shared with tool.c and scans this counter.
+  // Keep it synchronized with hddsupertool's script line count.
+  total_script_lines_ccc = i;
 
   if (verbose_ccc > 1)
   {
@@ -1990,14 +2226,21 @@ int check_arguments_ccc(char *var_name)
       }
       char current_argument[MAX_VARIABLE_LENGTH];
       char name[MAX_VARIABLE_NAME_LENGTH];
-      strcpy (current_argument, argument_ccc[c]);
+      if (strlcpy (current_argument, argument_ccc[c], sizeof(current_argument)) >= sizeof(current_argument))
+      {
+        continue;
+      }
       int length = strlen(current_argument);
       int i;
       for (i = 0; i < length; i++)
       {
         if (current_argument[i] == '=')
         {
-          strncpy (name, current_argument, i);
+          if ((size_t)i >= sizeof(name))
+          {
+            break;
+          }
+          memcpy (name, current_argument, i);
           name[i] = '\0';
           //fprintf (stdout, "var_name= %s\n", var_name);
           if (strcmp(var_name, name) == 0)
@@ -3136,4 +3379,3 @@ int set_lun_dialog_ccc (int max_lun)
   INFO("This function is only implemented in the GUI. Now we are choosing 0 by default.");
   return 0;
 }
-
